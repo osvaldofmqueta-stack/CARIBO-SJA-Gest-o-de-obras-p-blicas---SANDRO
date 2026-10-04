@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 48" fill="none">
+  <rect x="2" y="3" width="42" height="42" rx="7" fill="#203640"/>
+  <path d="M10 19 23 11l13 8H10Z" fill="#D7A34C"/>
+  <path d="M12 21h22v3H12zm2 4h4v9h-4zm7 0h4v9h-4zm7 0h4v9h-4zm-17 10h24v3H11z" fill="#D7A34C"/>
+  <text x="55" y="23" fill="#203640" font-family="Arial,sans-serif" font-size="16" font-weight="700" letter-spacing="2">CARIBO</text>
+  <text x="55" y="37" fill="#687A78" font-family="Arial,sans-serif" font-size="9" letter-spacing="1.2">SJA · OBRAS PÚBLICAS</text>
+</svg>

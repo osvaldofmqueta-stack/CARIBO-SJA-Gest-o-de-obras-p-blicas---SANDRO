@@ -1,0 +1,30 @@
+kind = "api"
+previewPath = "/api" # TODO - should be excluded from preview in the first place
+title = "API Server"
+version = "1.0.0"
+id = "3B4_FFSkEVBkAeYMFRJ2e"
+
+[[services]]
+localPort = 8080
+name = "API Server"
+paths = ["/api"]
+
+[services.development]
+run = "python manage.py migrate --noinput && python manage.py runserver 0.0.0.0:8080"
+
+[services.production]
+
+[services.production.build]
+args = ["python", "-m", "compileall", "-q", "config", "works"]
+
+[services.production.build.env]
+
+[services.production.run]
+# we don't run through pnpm to make startup faster in production
+args = ["gunicorn", "config.wsgi:application", "--bind", "0.0.0.0:8080", "--workers", "2"]
+
+[services.production.run.env]
+PORT = "8080"
+
+[services.production.health.startup]
+path = "/api/healthz"

@@ -1,0 +1,962 @@
+openapi: 3.1.0
+info:
+  # Do not change the title, if the title changes, the import paths will be broken
+  title: Api
+  version: 0.1.0
+  description: API de gestão e fiscalização de obras públicas da Caribo SJA
+servers:
+  - url: /api
+    description: Base API path
+security:
+  - DjangoSession: []
+tags:
+  - name: health
+    description: Health operations
+  - name: dashboard
+    description: Indicadores e atividade
+  - name: obras
+    description: Gestão de obras e contratos
+  - name: fiscalizacoes
+    description: Visitas e inspeções de campo
+  - name: ocorrencias
+    description: Não conformidades e ocorrências
+  - name: acesso
+    description: Perfis de acesso autenticados
+  - name: portal-cliente
+    description: Obras e actualizações visíveis ao cliente
+paths:
+  /healthz:
+    get:
+      operationId: healthCheck
+      tags: [health]
+      summary: Health check
+      description: Returns server health status
+      security: []
+      responses:
+        "200":
+          description: Healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthStatus"
+  /me:
+    get:
+      operationId: getMyAccessProfile
+      tags: [acesso]
+      summary: Consultar o perfil e as permissões da conta actual
+      responses:
+        "200":
+          description: Perfil de acesso atribuído à conta individual
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AccessProfile"
+        "401":
+          description: Sessão ausente, inválida ou expirada
+        "403":
+          description: Perfil não atribuído ou desactivado
+  /dashboard:
+    get:
+      operationId: getDashboard
+      tags: [dashboard]
+      summary: Obter indicadores operacionais
+      responses:
+        "200":
+          description: Indicadores do conjunto de obras
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Dashboard"
+  /client/obras:
+    get:
+      operationId: listClientObras
+      tags: [portal-cliente]
+      summary: Listar as obras atribuídas à conta do cliente
+      responses:
+        "200":
+          description: Obras atribuídas, sem dados financeiros ou de contratação
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ClientObra"
+        "403":
+          description: A conta não tem o perfil de cliente
+  /client/obras/{obra_id}:
+    parameters:
+      - name: obra_id
+        in: path
+        required: true
+        schema:
+          type: integer
+    get:
+      operationId: getClientObra
+      tags: [portal-cliente]
+      summary: Consultar uma obra atribuída ao cliente
+      responses:
+        "200":
+          description: Dados seguros da obra
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ClientObra"
+        "404":
+          description: Obra não atribuída ou não encontrada
+  /obras/{obra_id}/actualizacoes:
+    parameters:
+      - name: obra_id
+        in: path
+        required: true
+        schema:
+          type: integer
+    get:
+      operationId: listObraActualizacoes
+      tags: [portal-cliente]
+      summary: Consultar actualizações publicadas para uma obra autorizada
+      responses:
+        "200":
+          description: Actualizações cronológicas com fotografias privadas
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ActualizacaoObra"
+        "404":
+          description: Obra não atribuída ou não encontrada
+    post:
+      operationId: createObraActualizacao
+      tags: [portal-cliente]
+      summary: Publicar uma actualização de progresso
+      description: Apenas gestores e fiscais podem publicar actualizações.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ActualizacaoObraInput"
+      responses:
+        "201":
+          description: Actualização publicada
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ActualizacaoObra"
+        "400":
+          description: Dados inválidos ou fotografia não confirmada
+        "403":
+          description: A conta não pode publicar actualizações
+        "404":
+          description: Obra não encontrada
+  /obras/{obra_id}/actualizacoes/upload-url:
+    parameters:
+      - name: obra_id
+        in: path
+        required: true
+        schema:
+          type: integer
+    post:
+      operationId: createObraPhotoUploadUrl
+      tags: [portal-cliente]
+      summary: Obter um destino temporário para carregar uma fotografia privada
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PhotoUploadRequest"
+      responses:
+        "200":
+          description: Destino de carregamento (URL temporário em App Storage ou modo local)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PhotoUploadTarget"
+        "403":
+          description: A conta não pode carregar fotografias
+        "404":
+          description: Obra não encontrada
+  /obras/{obra_id}/actualizacoes/{actualizacao_id}/fotos/{foto_id}:
+    parameters:
+      - name: obra_id
+        in: path
+        required: true
+        schema:
+          type: integer
+      - name: actualizacao_id
+        in: path
+        required: true
+        schema:
+          type: integer
+      - name: foto_id
+        in: path
+        required: true
+        schema:
+          type: integer
+    get:
+      operationId: getObraPhoto
+      tags: [portal-cliente]
+      summary: Obter uma fotografia após validar a atribuição à obra
+      responses:
+        "200":
+          description: Conteúdo da fotografia
+          content:
+            image/jpeg:
+              schema:
+                type: string
+                format: binary
+            image/png:
+              schema:
+                type: string
+                format: binary
+            image/webp:
+              schema:
+                type: string
+                format: binary
+        "404":
+          description: Fotografia não autorizada ou não encontrada
+  /obras:
+    get:
+      operationId: listObras
+      tags: [obras]
+      summary: Listar e pesquisar obras
+      parameters:
+        - name: search
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: status
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Obras encontradas
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Obra"
+    post:
+      operationId: createObra
+      tags: [obras]
+      summary: Registar uma obra
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ObraInput"
+      responses:
+        "201":
+          description: Obra criada
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Obra"
+  /obras/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+    get:
+      operationId: getObra
+      tags: [obras]
+      summary: Consultar uma obra
+      responses:
+        "200":
+          description: Obra encontrada
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Obra"
+        "404":
+          description: Obra não encontrada
+    patch:
+      operationId: updateObra
+      tags: [obras]
+      summary: Actualizar dados de uma obra
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ObraUpdate"
+      responses:
+        "200":
+          description: Obra actualizada
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Obra"
+        "404":
+          description: Obra não encontrada
+    delete:
+      operationId: deleteObra
+      tags: [obras]
+      summary: Remover uma obra
+      responses:
+        "204":
+          description: Obra removida
+        "404":
+          description: Obra não encontrada
+  /fiscalizacoes:
+    get:
+      operationId: listFiscalizacoes
+      tags: [fiscalizacoes]
+      summary: Listar fiscalizações
+      responses:
+        "200":
+          description: Fiscalizações registadas
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Fiscalizacao"
+    post:
+      operationId: createFiscalizacao
+      tags: [fiscalizacoes]
+      summary: Registar visita de fiscalização
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FiscalizacaoInput"
+      responses:
+        "201":
+          description: Fiscalização criada
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Fiscalizacao"
+  /fiscalizacoes/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+    patch:
+      operationId: updateFiscalizacao
+      tags: [fiscalizacoes]
+      summary: Actualizar uma fiscalização
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FiscalizacaoUpdate"
+      responses:
+        "200":
+          description: Fiscalização actualizada
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Fiscalizacao"
+    delete:
+      operationId: deleteFiscalizacao
+      tags: [fiscalizacoes]
+      summary: Remover uma fiscalização
+      responses:
+        "204":
+          description: Fiscalização removida
+  /ocorrencias:
+    get:
+      operationId: listOcorrencias
+      tags: [ocorrencias]
+      summary: Listar ocorrências e pendências
+      responses:
+        "200":
+          description: Ocorrências registadas
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Ocorrencia"
+    post:
+      operationId: createOcorrencia
+      tags: [ocorrencias]
+      summary: Registar uma ocorrência
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OcorrenciaInput"
+      responses:
+        "201":
+          description: Ocorrência criada
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Ocorrencia"
+  /ocorrencias/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+    patch:
+      operationId: updateOcorrencia
+      tags: [ocorrencias]
+      summary: Actualizar o estado de uma ocorrência
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OcorrenciaUpdate"
+      responses:
+        "200":
+          description: Ocorrência actualizada
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Ocorrencia"
+    delete:
+      operationId: deleteOcorrencia
+      tags: [ocorrencias]
+      summary: Remover uma ocorrência
+      responses:
+        "204":
+          description: Ocorrência removida
+components:
+  securitySchemes:
+    DjangoSession:
+      type: apiKey
+      in: cookie
+      name: sessionid
+  schemas:
+    HealthStatus:
+      type: object
+      properties:
+        status:
+          type: string
+      required:
+        - status
+    AccessProfile:
+      type: object
+      properties:
+        role:
+          type: string
+          enum: [gestor, fiscal, consulta, cliente]
+        role_label:
+          type: string
+        can_manage_works:
+          type: boolean
+        can_write_field_records:
+          type: boolean
+        can_delete_field_records:
+          type: boolean
+        can_publish_updates:
+          type: boolean
+        is_client:
+          type: boolean
+      required:
+        - role
+        - role_label
+        - can_manage_works
+        - can_write_field_records
+        - can_delete_field_records
+        - can_publish_updates
+        - is_client
+    ClientObra:
+      type: object
+      properties:
+        id:
+          type: integer
+        referencia:
+          type: string
+        nome:
+          type: string
+        descricao:
+          type: string
+        provincia:
+          type: string
+        municipio:
+          type: string
+        progresso:
+          type: number
+        estado:
+          type: string
+        estado_label:
+          type: string
+        data_inicio:
+          type: string
+          format: date
+        prazo_conclusao:
+          type: string
+          format: date
+        actualizado_em:
+          type: string
+          format: date-time
+      required:
+        - id
+        - referencia
+        - nome
+        - descricao
+        - provincia
+        - municipio
+        - progresso
+        - estado
+        - estado_label
+        - data_inicio
+        - prazo_conclusao
+        - actualizado_em
+    ActualizacaoFoto:
+      type: object
+      properties:
+        id:
+          type: integer
+        nome_original:
+          type: string
+        content_type:
+          type: string
+          enum: [image/jpeg, image/png, image/webp]
+        tamanho:
+          type: integer
+        foto_url:
+          type: string
+      required: [id, nome_original, content_type, tamanho, foto_url]
+    ActualizacaoObra:
+      type: object
+      properties:
+        id:
+          type: integer
+        titulo:
+          type: string
+        descricao:
+          type: string
+        progresso:
+          type: number
+        autor:
+          type: string
+        criado_em:
+          type: string
+          format: date-time
+        fotos:
+          type: array
+          items:
+            $ref: "#/components/schemas/ActualizacaoFoto"
+      required: [id, titulo, descricao, progresso, autor, criado_em, fotos]
+    ActualizacaoFotoInput:
+      type: object
+      properties:
+        object_path:
+          type: string
+        storage_backend:
+          type: string
+          enum: [object, local]
+        nome_original:
+          type: string
+        content_type:
+          type: string
+          enum: [image/jpeg, image/png, image/webp]
+        tamanho:
+          type: integer
+          minimum: 1
+          maximum: 10485760
+      required: [object_path, storage_backend, nome_original, content_type, tamanho]
+    ActualizacaoObraInput:
+      type: object
+      properties:
+        titulo:
+          type: string
+          minLength: 1
+          maxLength: 180
+        descricao:
+          type: string
+        progresso:
+          type: number
+          minimum: 0
+          maximum: 100
+        fotos:
+          type: array
+          maxItems: 6
+          items:
+            $ref: "#/components/schemas/ActualizacaoFotoInput"
+      required: [titulo, progresso]
+    PhotoUploadRequest:
+      type: object
+      properties:
+        content_type:
+          type: string
+          enum: [image/jpeg, image/png, image/webp]
+        tamanho:
+          type: integer
+          minimum: 1
+          maximum: 10485760
+      required: [content_type, tamanho]
+    PhotoUploadTarget:
+      type: object
+      properties:
+        backend:
+          type: string
+          enum: [object, local]
+        object_path:
+          type: [string, "null"]
+        upload_url:
+          type: [string, "null"]
+        content_type:
+          type: string
+      required: [backend, object_path, upload_url]
+    Dashboard:
+      type: object
+      properties:
+        total_obras:
+          type: integer
+        obras_ativas:
+          type: integer
+        obras_atrasadas:
+          type: integer
+        progresso_medio:
+          type: number
+        valor_contratual:
+          type: number
+        valor_pago:
+          type: number
+        ocorrencias_abertas:
+          type: integer
+        fiscalizacoes_mes:
+          type: integer
+        obras:
+          type: array
+          items:
+            $ref: "#/components/schemas/Obra"
+        fiscalizacoes_recentes:
+          type: array
+          items:
+            $ref: "#/components/schemas/Fiscalizacao"
+        ocorrencias_criticas:
+          type: array
+          items:
+            $ref: "#/components/schemas/Ocorrencia"
+      required:
+        - total_obras
+        - obras_ativas
+        - obras_atrasadas
+        - progresso_medio
+        - valor_contratual
+        - valor_pago
+        - ocorrencias_abertas
+        - fiscalizacoes_mes
+        - obras
+        - fiscalizacoes_recentes
+        - ocorrencias_criticas
+    Obra:
+      type: object
+      properties:
+        id:
+          type: integer
+        referencia:
+          type: string
+        nome:
+          type: string
+        descricao:
+          type: string
+        provincia:
+          type: string
+        municipio:
+          type: string
+        empreiteiro:
+          type: string
+        valor_contrato:
+          type: number
+        valor_pago:
+          type: number
+        progresso:
+          type: number
+        estado:
+          type: string
+        data_inicio:
+          type: string
+          format: date
+        prazo_conclusao:
+          type: string
+          format: date
+        criado_em:
+          type: string
+          format: date-time
+      required:
+        - id
+        - referencia
+        - nome
+        - descricao
+        - provincia
+        - municipio
+        - empreiteiro
+        - valor_contrato
+        - valor_pago
+        - progresso
+        - estado
+        - data_inicio
+        - prazo_conclusao
+        - criado_em
+    ObraInput:
+      type: object
+      properties:
+        referencia:
+          type: string
+          minLength: 1
+        nome:
+          type: string
+          minLength: 1
+        descricao:
+          type: string
+        provincia:
+          type: string
+        municipio:
+          type: string
+        empreiteiro:
+          type: string
+        valor_contrato:
+          type: number
+          minimum: 0
+        valor_pago:
+          type: number
+          minimum: 0
+        progresso:
+          type: number
+          minimum: 0
+          maximum: 100
+        estado:
+          type: string
+        data_inicio:
+          type: string
+          format: date
+        prazo_conclusao:
+          type: string
+          format: date
+      required:
+        - referencia
+        - nome
+        - provincia
+        - municipio
+        - empreiteiro
+        - valor_contrato
+        - valor_pago
+        - progresso
+        - estado
+        - data_inicio
+        - prazo_conclusao
+    ObraUpdate:
+      type: object
+      properties:
+        referencia:
+          type: string
+          minLength: 1
+        nome:
+          type: string
+          minLength: 1
+        descricao:
+          type: string
+        provincia:
+          type: string
+        municipio:
+          type: string
+        empreiteiro:
+          type: string
+        valor_contrato:
+          type: number
+          minimum: 0
+        valor_pago:
+          type: number
+          minimum: 0
+        progresso:
+          type: number
+          minimum: 0
+          maximum: 100
+        estado:
+          type: string
+        data_inicio:
+          type: string
+          format: date
+        prazo_conclusao:
+          type: string
+          format: date
+    Fiscalizacao:
+      type: object
+      properties:
+        id:
+          type: integer
+        obra_id:
+          type: integer
+        obra_nome:
+          type: string
+        inspector:
+          type: string
+        data_visita:
+          type: string
+          format: date
+        progresso:
+          type: number
+        qualidade:
+          type: string
+        observacoes:
+          type: string
+        proxima_visita:
+          type: ["string", "null"]
+          format: date
+        criado_em:
+          type: string
+          format: date-time
+      required:
+        - id
+        - obra_id
+        - obra_nome
+        - inspector
+        - data_visita
+        - progresso
+        - qualidade
+        - observacoes
+        - proxima_visita
+        - criado_em
+    FiscalizacaoInput:
+      type: object
+      properties:
+        obra_id:
+          type: integer
+        inspector:
+          type: string
+        data_visita:
+          type: string
+          format: date
+        progresso:
+          type: number
+          minimum: 0
+          maximum: 100
+        qualidade:
+          type: string
+          enum: [conforme, atencao, nao_conforme]
+        observacoes:
+          type: string
+        proxima_visita:
+          type: ["string", "null"]
+          format: date
+      required:
+        - obra_id
+        - inspector
+        - data_visita
+        - progresso
+        - qualidade
+    FiscalizacaoUpdate:
+      type: object
+      properties:
+        obra_id:
+          type: integer
+        inspector:
+          type: string
+        data_visita:
+          type: string
+          format: date
+        progresso:
+          type: number
+          minimum: 0
+          maximum: 100
+        qualidade:
+          type: string
+          enum: [conforme, atencao, nao_conforme]
+        observacoes:
+          type: string
+        proxima_visita:
+          type: ["string", "null"]
+          format: date
+    Ocorrencia:
+      type: object
+      properties:
+        id:
+          type: integer
+        obra_id:
+          type: integer
+        obra_nome:
+          type: string
+        titulo:
+          type: string
+        descricao:
+          type: string
+        gravidade:
+          type: string
+        estado:
+          type: string
+        data_registo:
+          type: string
+          format: date
+        prazo_resolucao:
+          type: ["string", "null"]
+          format: date
+        criado_em:
+          type: string
+          format: date-time
+      required:
+        - id
+        - obra_id
+        - obra_nome
+        - titulo
+        - descricao
+        - gravidade
+        - estado
+        - data_registo
+        - prazo_resolucao
+        - criado_em
+    OcorrenciaInput:
+      type: object
+      properties:
+        obra_id:
+          type: integer
+        titulo:
+          type: string
+          minLength: 1
+        descricao:
+          type: string
+        gravidade:
+          type: string
+          enum: [baixa, media, alta, critica]
+        estado:
+          type: string
+          enum: [aberta, em_resolucao, resolvida]
+        data_registo:
+          type: string
+          format: date
+        prazo_resolucao:
+          type: ["string", "null"]
+          format: date
+      required:
+        - obra_id
+        - titulo
+        - descricao
+        - gravidade
+        - estado
+        - data_registo
+    OcorrenciaUpdate:
+      type: object
+      properties:
+        obra_id:
+          type: integer
+        titulo:
+          type: string
+          minLength: 1
+        descricao:
+          type: string
+        gravidade:
+          type: string
+          enum: [baixa, media, alta, critica]
+        estado:
+          type: string
+          enum: [aberta, em_resolucao, resolvida]
+        data_registo:
+          type: string
+          format: date
+        prazo_resolucao:
+          type: ["string", "null"]
+          format: date
+

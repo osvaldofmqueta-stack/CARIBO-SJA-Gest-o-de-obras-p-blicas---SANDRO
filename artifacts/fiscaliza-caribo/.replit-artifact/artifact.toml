@@ -1,0 +1,28 @@
+kind = "web"
+previewPath = "/"
+title = "Caribo SJA — Fiscalização de Obras"
+description = "Sistema web para a Caribo SJA gerir empreitadas públicas, contratos, fiscalização de campo, execução físico-financeira, prazos e ocorrências."
+version = "1.0.0"
+id = "artifacts/fiscaliza-caribo"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 25087
+
+[services.development]
+run = "pnpm --filter @workspace/fiscaliza-caribo run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/fiscaliza-caribo", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/fiscaliza-caribo/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "25087"
+BASE_PATH = "/"

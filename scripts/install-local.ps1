@@ -1,0 +1,779 @@
+$ErrorActionPreference = "Stop"
+
+$projectRoot = Split-Path -Parent $PSScriptRoot
+$apiDirectory = Join-Path $projectRoot "artifacts\api-server"
+$manageScript = Join-Path $apiDirectory "manage.py"
+$localDirectory = Join-Path $env:LOCALAPPDATA "CariboSJA"
+$localConfig = Join-Path $localDirectory "local.env"
+$script:AdminPassword = $null
+$script:StartedProcesses = New-Object System.Collections.ArrayList
+$script:DatabaseMode = $null
+$script:BackupPath = $null
+$script:BackupFormat = $null
+
+function Write-Step {
+    param([string]$Message)
+    Write-Host ""
+    Write-Host "== $Message ==" -ForegroundColor Cyan
+}
+
+function Confirm-Action {
+    param([string]$Message)
+    $answer = Read-Host "$Message [S/N]"
+    return $answer.Trim().ToUpperInvariant() -in @("S", "SIM", "Y", "YES")
+}
+
+function Select-DatabaseSetup {
+    Write-Step "Choosing local database contents"
+    Write-Host "1. Import a full PostgreSQL backup (.sql, .dump, .backup, or .tar)"
+    Write-Host "2. Create the application tables and load demonstration data"
+
+    do {
+        $choice = Read-Host "Choose 1 or 2"
+    } while ($choice -notin @("1", "2"))
+
+    if ($choice -eq "2") {
+        $script:DatabaseMode = "demo"
+        return
+    }
+
+    $script:DatabaseMode = "backup"
+    $backupPath = (Read-Host "Enter the full path to the PostgreSQL backup file").Trim()
+    if ($backupPath.Length -ge 2 -and
+        $backupPath.StartsWith('"') -and
+        $backupPath.EndsWith('"')) {
+        $backupPath = $backupPath.Substring(1, $backupPath.Length - 2)
+    }
+    if (-not (Test-Path -LiteralPath $backupPath -PathType Leaf)) {
+        throw "The selected PostgreSQL backup file was not found."
+    }
+
+    $script:BackupPath = (Resolve-Path -LiteralPath $backupPath).Path
+    $extension = [System.IO.Path]::GetExtension($script:BackupPath).ToLowerInvariant()
+    if ($extension -eq ".sql") {
+        $script:BackupFormat = "sql"
+        $unsafeSql = Select-String -LiteralPath $script:BackupPath -Quiet -Pattern '^\s*\\(?:connect|c)\b|^\s*(?:CREATE|ALTER)\s+DATABASE\b|^\s*(?:CREATE|ALTER|DROP)\s+(?:ROLE|USER)\b|^\s*SET\s+SESSION\s+AUTHORIZATION\b|^\s*ALTER\s+.*\sOWNER\s+TO\b|^\s*(?:GRANT|REVOKE)\b'
+        if ($unsafeSql) {
+            throw "This SQL file contains database, role, ownership, or permission commands. Use a single-database pg_dump made with --no-owner --no-acl and without --create."
+        }
+        $hasTableDefinitions = Select-String -LiteralPath $script:BackupPath -Quiet -Pattern '^\s*CREATE\s+TABLE\b'
+        if (-not $hasTableDefinitions) {
+            throw "The SQL file does not appear to contain application table definitions. Select a full database backup, not a data-only export."
+        }
+        Write-Host "For a plain SQL file, use a full single-database pg_dump made with --no-owner --no-acl and without --create."
+    }
+    elseif ($extension -in @(".dump", ".backup", ".tar")) {
+        $script:BackupFormat = "archive"
+    }
+    else {
+        throw "Unsupported backup file type. Select a .sql, .dump, .backup, or .tar file."
+    }
+}
+
+function Refresh-Path {
+    $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
+    $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+    $env:Path = "$machinePath;$userPath"
+}
+
+function Install-WingetPackage {
+    param(
+        [string]$PackageId,
+        [string]$DisplayName,
+        [string]$DownloadUrl
+    )
+
+    $winget = Get-Command winget.exe -ErrorAction SilentlyContinue
+    if (-not $winget) {
+        Write-Warning "winget (App Installer) is missing."
+        if (Confirm-Action "Open Microsoft Store to install App Installer?") {
+            Start-Process "ms-windows-store://pdp/?ProductId=9NBLGGH4NNS1"
+        }
+        throw "Install App Installer, then run installer.bat again."
+    }
+
+    if (-not (Confirm-Action "$DisplayName is missing or unsupported. Install it now?")) {
+        throw "Installation of $DisplayName was declined."
+    }
+
+    Write-Host "Installing $DisplayName with winget..."
+    & $winget.Source install --id $PackageId --exact --source winget --accept-source-agreements --accept-package-agreements
+    if ($LASTEXITCODE -ne 0) {
+        Start-Process $DownloadUrl
+        throw "winget could not install $DisplayName. The official download page was opened; install it and rerun installer.bat."
+    }
+    Refresh-Path
+}
+
+function Find-Python {
+    $launcher = Get-Command py.exe -ErrorAction SilentlyContinue
+    if ($launcher) {
+        try {
+            $versionText = & $launcher.Source -3 -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])' 2>$null
+            if ($LASTEXITCODE -eq 0) {
+                $version = [version]($versionText | Select-Object -Last 1)
+                if ($version -ge [version]"3.11.0") {
+                    return [pscustomobject]@{
+                        Path = $launcher.Source
+                        Prefix = @("-3")
+                    }
+                }
+            }
+        }
+        catch {}
+    }
+
+    $python = Get-Command python.exe -ErrorAction SilentlyContinue
+    if ($python) {
+        try {
+            $versionText = & $python.Source -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])' 2>$null
+            if ($LASTEXITCODE -eq 0) {
+                $version = [version]($versionText | Select-Object -Last 1)
+                if ($version -ge [version]"3.11.0") {
+                    return [pscustomobject]@{
+                        Path = $python.Source
+                        Prefix = @()
+                    }
+                }
+            }
+        }
+        catch {}
+    }
+
+    return $null
+}
+
+function Find-NodeVersion {
+    $node = Get-Command node.exe -ErrorAction SilentlyContinue
+    if (-not $node) {
+        return $null
+    }
+
+    try {
+        $versionText = (& $node.Source --version 2>$null).Trim().TrimStart("v")
+        if ($LASTEXITCODE -eq 0) {
+            return [pscustomobject]@{
+                Path = $node.Source
+                Version = [version]$versionText
+            }
+        }
+    }
+    catch {}
+    return $null
+}
+
+function Test-SupportedNode {
+    param([version]$Version)
+    return (($Version.Major -eq 20 -and $Version.Minor -ge 19) -or
+        ($Version.Major -ge 22 -and ($Version.Major -gt 22 -or $Version.Minor -ge 12)))
+}
+
+function Find-Pnpm {
+    $pnpm = Get-Command pnpm.cmd -ErrorAction SilentlyContinue
+    if (-not $pnpm) {
+        $pnpm = Get-Command pnpm -ErrorAction SilentlyContinue
+    }
+    return $pnpm
+}
+
+function Find-Psql {
+    $psql = Get-Command psql.exe -ErrorAction SilentlyContinue
+    if ($psql) {
+        return $psql.Source
+    }
+
+    $roots = @()
+    if ($env:ProgramFiles) {
+        $roots += Join-Path $env:ProgramFiles "PostgreSQL"
+    }
+    $programFilesX86 = [Environment]::GetEnvironmentVariable("ProgramFiles(x86)")
+    if ($programFilesX86) {
+        $roots += Join-Path $programFilesX86 "PostgreSQL"
+    }
+
+    foreach ($root in $roots) {
+        if (Test-Path $root) {
+            $match = Get-ChildItem -Path $root -Filter "psql.exe" -Recurse -File -ErrorAction SilentlyContinue |
+                Select-Object -First 1
+            if ($match) {
+                return $match.FullName
+            }
+        }
+    }
+    return $null
+}
+
+function Find-PgRestore {
+    $restore = Get-Command pg_restore.exe -ErrorAction SilentlyContinue
+    if ($restore) {
+        return $restore.Source
+    }
+
+    $psqlPath = Find-Psql
+    if ($psqlPath) {
+        $sibling = Join-Path (Split-Path -Parent $psqlPath) "pg_restore.exe"
+        if (Test-Path $sibling) {
+            return $sibling
+        }
+    }
+
+    return $null
+}
+
+function Ensure-Prerequisites {
+    Write-Step "Checking Windows prerequisites"
+
+    if (-not (Find-Python)) {
+        Install-WingetPackage "Python.Python.3.12" "Python 3.12" "https://www.python.org/downloads/windows/"
+    }
+    if (-not (Find-Python)) {
+        throw "Python 3.11 or newer was not found after installation."
+    }
+
+    $node = Find-NodeVersion
+    if (-not $node -or -not (Test-SupportedNode $node.Version)) {
+        Install-WingetPackage "OpenJS.NodeJS.LTS" "Node.js LTS" "https://nodejs.org/en/download"
+    }
+    $node = Find-NodeVersion
+    if (-not $node -or -not (Test-SupportedNode $node.Version)) {
+        throw "A supported Node.js version was not found. Vite requires Node.js 20.19+ or 22.12+."
+    }
+
+    $pnpm = Find-Pnpm
+    $pnpmMajor = 0
+    if ($pnpm) {
+        try {
+            $pnpmVersion = (& $pnpm.Source --version 2>$null).Trim()
+            if ($LASTEXITCODE -eq 0) {
+                $pnpmMajor = [int]($pnpmVersion.Split(".")[0])
+            }
+        }
+        catch {}
+    }
+    if (-not $pnpm -or $pnpmMajor -lt 9 -or $pnpmMajor -gt 10) {
+        $npm = Get-Command npm.cmd -ErrorAction SilentlyContinue
+        if (-not $npm) {
+            throw "npm was not found with Node.js. Reinstall Node.js LTS and rerun installer.bat."
+        }
+        if (-not (Confirm-Action "pnpm 9 is required by this project. Install it now?")) {
+            throw "Installation of pnpm was declined."
+        }
+        & $npm.Source install --global pnpm@9
+        if ($LASTEXITCODE -ne 0) {
+            throw "Could not install pnpm 9."
+        }
+        Refresh-Path
+    }
+    if (-not (Find-Pnpm)) {
+        throw "pnpm was not found after installation. Close this window, reopen it, and rerun installer.bat."
+    }
+
+    if (-not (Find-Psql)) {
+        Install-WingetPackage "PostgreSQL.PostgreSQL.17" "PostgreSQL 17" "https://www.postgresql.org/download/windows/"
+    }
+    if (-not (Find-Psql)) {
+        throw "psql.exe was not found after installing PostgreSQL."
+    }
+}
+
+function Install-ProjectDependencies {
+    Write-Step "Installing project dependencies"
+
+    $pythonInfo = Find-Python
+    $venvDirectory = Join-Path $projectRoot ".venv"
+    $venvPython = Join-Path $venvDirectory "Scripts\python.exe"
+    if (-not (Test-Path $venvPython)) {
+        $pythonArguments = @($pythonInfo.Prefix) + @("-m", "venv", $venvDirectory)
+        & $pythonInfo.Path @pythonArguments
+        if ($LASTEXITCODE -ne 0) {
+            throw "Could not create the local Python environment."
+        }
+    }
+
+    & $venvPython -m pip install --upgrade pip
+    if ($LASTEXITCODE -ne 0) {
+        throw "Could not prepare pip in the local Python environment."
+    }
+    & $venvPython -m pip install -e $projectRoot
+    if ($LASTEXITCODE -ne 0) {
+        throw "Could not install the Python dependencies from pyproject.toml."
+    }
+
+    $pnpm = Find-Pnpm
+    & $pnpm.Source install --frozen-lockfile
+    if ($LASTEXITCODE -ne 0) {
+        throw "Could not install the frontend dependencies from pnpm-lock.yaml."
+    }
+}
+
+function Start-PostgresService {
+    $services = @(Get-Service -Name "postgresql*" -ErrorAction SilentlyContinue)
+    if ($services.Count -eq 0) {
+        throw "The PostgreSQL service was not found. Install PostgreSQL 17 and rerun installer.bat."
+    }
+
+    $service = $services | Sort-Object Name -Descending | Select-Object -First 1
+    if ($service.Status -ne "Running") {
+        Write-Host "Starting PostgreSQL service $($service.Name)..."
+        try {
+            Start-Service -Name $service.Name
+        }
+        catch {
+            throw "Could not start PostgreSQL. Start its service from Windows Services, then rerun installer.bat."
+        }
+    }
+}
+
+function Invoke-Psql {
+    param(
+        [string]$Database,
+        [string]$Sql
+    )
+
+    $psqlPath = Find-Psql
+    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $startInfo.FileName = $psqlPath
+    $startInfo.Arguments = "-X -q -t -A -v ON_ERROR_STOP=1 -h 127.0.0.1 -p 5432 -U postgres -d $Database"
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardInput = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $startInfo.EnvironmentVariables["PGPASSWORD"] = $script:AdminPassword
+
+    $process = New-Object System.Diagnostics.Process
+    $process.StartInfo = $startInfo
+    [void]$process.Start()
+    $process.StandardInput.WriteLine($Sql)
+    $process.StandardInput.Close()
+    $stdout = $process.StandardOutput.ReadToEnd()
+    $stderr = $process.StandardError.ReadToEnd()
+    $process.WaitForExit()
+
+    if ($process.ExitCode -ne 0) {
+        throw "PostgreSQL rejected a setup command. Check the postgres password and local service. $stderr"
+    }
+    return $stdout.Trim()
+}
+
+function Get-LocalDatabaseConnection {
+    if ([string]::IsNullOrWhiteSpace($env:DATABASE_URL)) {
+        throw "The local PostgreSQL connection is not configured."
+    }
+
+    try {
+        $databaseUri = [System.Uri]$env:DATABASE_URL
+        $separator = $databaseUri.UserInfo.IndexOf(":")
+        if ($separator -lt 1) {
+            throw "The database URL has no username or password."
+        }
+
+        $databaseName = [System.Uri]::UnescapeDataString($databaseUri.AbsolutePath.TrimStart("/"))
+        if ([string]::IsNullOrWhiteSpace($databaseName)) {
+            throw "The database URL has no database name."
+        }
+
+        return [pscustomobject]@{
+            Host = $databaseUri.Host
+            Port = if ($databaseUri.Port -gt 0) { $databaseUri.Port } else { 5432 }
+            Database = $databaseName
+            Username = [System.Uri]::UnescapeDataString($databaseUri.UserInfo.Substring(0, $separator))
+            Password = [System.Uri]::UnescapeDataString($databaseUri.UserInfo.Substring($separator + 1))
+        }
+    }
+    catch {
+        throw "The local PostgreSQL connection configuration is invalid."
+    }
+}
+
+function Invoke-LocalPsql {
+    param([string]$Sql)
+
+    $connection = Get-LocalDatabaseConnection
+    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $startInfo.FileName = Find-Psql
+    $startInfo.Arguments = "-X -q -t -A -v ON_ERROR_STOP=1 -h $($connection.Host) -p $($connection.Port) -U $($connection.Username) -d $($connection.Database)"
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardInput = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $startInfo.EnvironmentVariables["PGPASSWORD"] = $connection.Password
+
+    $process = New-Object System.Diagnostics.Process
+    $process.StartInfo = $startInfo
+    [void]$process.Start()
+    $process.StandardInput.WriteLine($Sql)
+    $process.StandardInput.Close()
+    $stdout = $process.StandardOutput.ReadToEnd()
+    $stderr = $process.StandardError.ReadToEnd()
+    $process.WaitForExit()
+
+    if ($process.ExitCode -ne 0) {
+        throw "Could not query the configured local database. Check the database URL and PostgreSQL service. $stderr"
+    }
+    return $stdout.Trim()
+}
+
+function Test-DatabaseEmpty {
+    param(
+        [string]$Database,
+        [switch]$UseLocalCredentials
+    )
+
+    $sql = @"
+SELECT CASE WHEN
+    EXISTS (
+        SELECT 1
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname <> 'information_schema'
+          AND n.nspname !~ '^pg_'
+    )
+    OR EXISTS (
+        SELECT 1
+        FROM pg_proc p
+        JOIN pg_namespace n ON n.oid = p.pronamespace
+        WHERE n.nspname <> 'information_schema'
+          AND n.nspname !~ '^pg_'
+    )
+    OR EXISTS (
+        SELECT 1
+        FROM pg_type t
+        JOIN pg_namespace n ON n.oid = t.typnamespace
+        WHERE n.nspname <> 'information_schema'
+          AND n.nspname !~ '^pg_'
+          AND t.typtype IN ('c', 'd', 'e', 'r')
+    )
+    OR EXISTS (
+        SELECT 1
+        FROM pg_namespace
+        WHERE nspname <> 'public'
+          AND nspname <> 'information_schema'
+          AND nspname !~ '^pg_'
+    )
+THEN '0' ELSE '1' END;
+"@
+    if ($UseLocalCredentials) {
+        return (Invoke-LocalPsql -Sql $sql) -eq "1"
+    }
+    return (Invoke-Psql -Database $Database -Sql $sql) -eq "1"
+}
+
+function Invoke-PostgresBackupRestore {
+    $connection = Get-LocalDatabaseConnection
+    $backupPathArgument = '"' + $script:BackupPath + '"'
+    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $false
+    $startInfo.EnvironmentVariables["PGPASSWORD"] = $connection.Password
+
+    if ($script:BackupFormat -eq "sql") {
+        $startInfo.FileName = Find-Psql
+        $startInfo.Arguments = "-X --single-transaction -v ON_ERROR_STOP=1 -h $($connection.Host) -p $($connection.Port) -U $($connection.Username) -d $($connection.Database) -f $backupPathArgument"
+    }
+    else {
+        $restorePath = Find-PgRestore
+        if (-not $restorePath) {
+            throw "pg_restore.exe was not found beside psql.exe. Reinstall PostgreSQL and rerun installer.bat."
+        }
+        $startInfo.FileName = $restorePath
+        $startInfo.Arguments = "--exit-on-error --single-transaction --no-owner --no-privileges -h $($connection.Host) -p $($connection.Port) -U $($connection.Username) -d $($connection.Database) $backupPathArgument"
+    }
+
+    Write-Host "Importing the full PostgreSQL backup. This may take several minutes..."
+    $process = New-Object System.Diagnostics.Process
+    $process.StartInfo = $startInfo
+    [void]$process.Start()
+    $process.WaitForExit()
+    if ($process.ExitCode -ne 0) {
+        throw "PostgreSQL could not restore the backup (exit code $($process.ExitCode)). Review the restore output above; the target database was empty before this attempt."
+    }
+}
+
+function Validate-PostgresBackupArchive {
+    if ($script:BackupFormat -ne "archive") {
+        return
+    }
+
+    $restorePath = Find-PgRestore
+    if (-not $restorePath) {
+        throw "pg_restore.exe was not found beside psql.exe. Reinstall PostgreSQL and rerun installer.bat."
+    }
+    & $restorePath --list $script:BackupPath 1>$null
+    if ($LASTEXITCODE -ne 0) {
+        throw "The selected backup is not a valid PostgreSQL custom, tar, or directory-format dump."
+    }
+}
+
+function Read-PostgresAdminPassword {
+    $securePassword = Read-Host "Enter the PostgreSQL administrator password for user postgres" -AsSecureString
+    $pointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($securePassword)
+    try {
+        $script:AdminPassword = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($pointer)
+    }
+    finally {
+        [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($pointer)
+    }
+    if ([string]::IsNullOrWhiteSpace($script:AdminPassword)) {
+        throw "The PostgreSQL administrator password cannot be empty."
+    }
+}
+
+function Create-LocalDatabase {
+    Write-Step "Preparing the local PostgreSQL database"
+    Start-PostgresService
+    Read-PostgresAdminPassword
+
+    $connectionTest = Invoke-Psql -Database "postgres" -Sql "SELECT 1;"
+    if ($connectionTest -ne "1") {
+        throw "Could not connect to PostgreSQL on 127.0.0.1:5432."
+    }
+
+    $databaseExists = Invoke-Psql -Database "postgres" -Sql "SELECT 1 FROM pg_database WHERE datname = 'fiscaliza_caribo';"
+    if ($databaseExists -eq "1") {
+        if ($script:DatabaseMode -eq "backup" -and
+            -not (Test-DatabaseEmpty -Database "fiscaliza_caribo")) {
+            throw "The local database fiscaliza_caribo already contains application objects. The backup was not imported and no existing data was changed."
+        }
+        if (-not (Confirm-Action "Database fiscaliza_caribo already exists. Reuse it without deleting data? The installer will adjust the database and schema owner/permissions.")) {
+            throw "Database setup was cancelled; no existing database was changed."
+        }
+    }
+
+    $roleExists = Invoke-Psql -Database "postgres" -Sql "SELECT 1 FROM pg_roles WHERE rolname = 'fiscaliza_app';"
+    if ($roleExists -eq "1") {
+        if (-not (Confirm-Action "PostgreSQL role fiscaliza_app already exists. Reset its password for this app? Other local apps using this role could be affected.")) {
+            throw "Database setup was cancelled; the existing fiscaliza_app role was not changed."
+        }
+    }
+    $appPassword = [Guid]::NewGuid().ToString("N") + [Guid]::NewGuid().ToString("N")
+    if ($roleExists -eq "1") {
+        $roleSql = "ALTER ROLE fiscaliza_app WITH LOGIN PASSWORD '$appPassword';"
+    }
+    else {
+        $roleSql = "CREATE ROLE fiscaliza_app WITH LOGIN PASSWORD '$appPassword';"
+    }
+    [void](Invoke-Psql -Database "postgres" -Sql $roleSql)
+
+    if ($databaseExists -eq "1") {
+        [void](Invoke-Psql -Database "postgres" -Sql "ALTER DATABASE fiscaliza_caribo OWNER TO fiscaliza_app;")
+        [void](Invoke-Psql -Database "fiscaliza_caribo" -Sql "ALTER SCHEMA public OWNER TO fiscaliza_app; GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO fiscaliza_app; GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO fiscaliza_app;")
+    }
+    else {
+        [void](Invoke-Psql -Database "postgres" -Sql "CREATE DATABASE fiscaliza_caribo OWNER fiscaliza_app;")
+        [void](Invoke-Psql -Database "fiscaliza_caribo" -Sql "ALTER SCHEMA public OWNER TO fiscaliza_app;")
+    }
+
+    [void][System.IO.Directory]::CreateDirectory($localDirectory)
+    $sessionSecret = [Guid]::NewGuid().ToString("N") + [Guid]::NewGuid().ToString("N")
+    $databaseUrl = "postgresql://fiscaliza_app:$appPassword@127.0.0.1:5432/fiscaliza_caribo"
+    $configContent = "DATABASE_URL=$databaseUrl`r`nSESSION_SECRET=$sessionSecret`r`nDJANGO_DEBUG=true`r`n"
+    [System.IO.File]::WriteAllText($localConfig, $configContent, [System.Text.Encoding]::ASCII)
+    $script:AdminPassword = $null
+    Write-Host "Local database credentials were saved under your Windows user profile, outside the project."
+}
+
+function Import-LocalConfig {
+    if (-not (Test-Path $localConfig)) {
+        return $false
+    }
+
+    foreach ($line in [System.IO.File]::ReadAllLines($localConfig)) {
+        if ([string]::IsNullOrWhiteSpace($line) -or $line.TrimStart().StartsWith("#")) {
+            continue
+        }
+        $separator = $line.IndexOf("=")
+        if ($separator -lt 1) {
+            throw "The local configuration file is invalid: $localConfig"
+        }
+        $key = $line.Substring(0, $separator).Trim()
+        $value = $line.Substring($separator + 1)
+        if ($key -notin @("DATABASE_URL", "SESSION_SECRET", "DJANGO_DEBUG")) {
+            throw "The local configuration file contains an unsupported setting: $key"
+        }
+        [Environment]::SetEnvironmentVariable($key, $value, "Process")
+    }
+
+    if (-not $env:DATABASE_URL -or -not $env:SESSION_SECRET) {
+        throw "The local configuration file is missing DATABASE_URL or SESSION_SECRET."
+    }
+    return $true
+}
+
+function Find-FreePort {
+    param(
+        [int]$FirstPort,
+        [int]$LastPort
+    )
+
+    for ($port = $FirstPort; $port -le $LastPort; $port++) {
+        $listener = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Loopback, $port)
+        try {
+            $listener.Start()
+            $listener.Stop()
+            return $port
+        }
+        catch {
+            try { $listener.Stop() } catch {}
+        }
+    }
+    return $null
+}
+
+function Test-LocalManager {
+    $python = Join-Path $projectRoot ".venv\Scripts\python.exe"
+    $code = "from works.models import AccessProfile; print('CARIBO_GESTOR_EXISTS=' + str(AccessProfile.objects.filter(role='gestor', activo=True, user__is_active=True, user__is_superuser=True).exists()))"
+    $output = & $python $manageScript shell -c $code
+    if ($LASTEXITCODE -ne 0) {
+        throw "Could not check for an existing local Gestor account."
+    }
+    return (($output -join "`n") -match "CARIBO_GESTOR_EXISTS=True")
+}
+
+function Wait-ForHttp {
+    param(
+        [string]$Url,
+        [System.Diagnostics.Process]$Process
+    )
+
+    for ($attempt = 0; $attempt -lt 45; $attempt++) {
+        if ($Process -and $Process.HasExited) {
+            return $false
+        }
+        try {
+            $response = Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec 2
+            if ($response.StatusCode -ge 200 -and $response.StatusCode -lt 400) {
+                return $true
+            }
+        }
+        catch {}
+        Start-Sleep -Seconds 1
+    }
+    return $false
+}
+
+try {
+    if (-not (Test-Path (Join-Path $apiDirectory "manage.py"))) {
+        throw "Run installer.bat from the project folder; artifacts\api-server\manage.py was not found."
+    }
+
+    Select-DatabaseSetup
+    Ensure-Prerequisites
+    Validate-PostgresBackupArchive
+    Install-ProjectDependencies
+
+    Write-Step "Loading local database configuration"
+    if (-not (Import-LocalConfig)) {
+        Create-LocalDatabase
+        if (-not (Import-LocalConfig)) {
+            throw "Could not load the local PostgreSQL configuration."
+        }
+    }
+
+    if ($script:DatabaseMode -eq "backup") {
+        if (-not (Test-DatabaseEmpty -UseLocalCredentials)) {
+            throw "The local database already contains application objects. The backup was not imported and no existing data was changed."
+        }
+
+        Write-Step "Importing the PostgreSQL backup"
+        [void](Invoke-LocalPsql -Sql "ALTER SCHEMA public OWNER TO fiscaliza_app; GRANT ALL PRIVILEGES ON SCHEMA public TO fiscaliza_app;")
+        Invoke-PostgresBackupRestore
+    }
+
+    $venvPython = Join-Path $projectRoot ".venv\Scripts\python.exe"
+    & $venvPython $manageScript check
+    if ($LASTEXITCODE -ne 0) {
+        throw "Django configuration checks failed."
+    }
+    & $venvPython $manageScript migrate --noinput
+    if ($LASTEXITCODE -ne 0) {
+        throw "Database migrations failed."
+    }
+    if ($script:DatabaseMode -eq "demo") {
+        & $venvPython $manageScript seed_demo
+        if ($LASTEXITCODE -ne 0) {
+            throw "Could not load the demonstration data."
+        }
+    }
+
+    if (-not (Test-LocalManager)) {
+        Write-Step "Creating the first local Gestor account"
+        Write-Host "No active local Gestor superuser was found. The command will ask for the email, name, and password."
+        & $venvPython $manageScript bootstrap_manager
+        if ($LASTEXITCODE -ne 0) {
+            throw "The Gestor account was not created."
+        }
+        if (-not (Test-LocalManager)) {
+            throw "The Gestor account could not be verified after setup."
+        }
+    }
+    else {
+        Write-Host "An active local Gestor account already exists; its password was not changed."
+    }
+
+    Write-Step "Starting the local application"
+    $apiPort = Find-FreePort -FirstPort 8080 -LastPort 8090
+    $webPort = Find-FreePort -FirstPort 5173 -LastPort 5190
+    if (-not $apiPort -or -not $webPort) {
+        throw "Could not find free local ports for the API and web app."
+    }
+
+    [Environment]::SetEnvironmentVariable("CARIBO_LOCAL", "1", "Process")
+    [Environment]::SetEnvironmentVariable("CARIBO_API_TARGET", "http://127.0.0.1:$apiPort", "Process")
+    [Environment]::SetEnvironmentVariable("PORT", [string]$webPort, "Process")
+    [Environment]::SetEnvironmentVariable("BASE_PATH", "/", "Process")
+
+    $apiProcess = Start-Process `
+        -FilePath $venvPython `
+        -ArgumentList @("manage.py", "runserver", "127.0.0.1:$apiPort") `
+        -WorkingDirectory $apiDirectory `
+        -PassThru
+    [void]$script:StartedProcesses.Add($apiProcess)
+
+    if (-not (Wait-ForHttp -Url "http://127.0.0.1:$apiPort/api/healthz" -Process $apiProcess)) {
+        throw "The local API did not become healthy on port $apiPort."
+    }
+
+    $commandPrompt = Join-Path $env:SystemRoot "System32\cmd.exe"
+    $webProcess = Start-Process `
+        -FilePath $commandPrompt `
+        -ArgumentList @("/k", "pnpm --filter @workspace/fiscaliza-caribo run dev") `
+        -WorkingDirectory $projectRoot `
+        -PassThru
+    [void]$script:StartedProcesses.Add($webProcess)
+
+    $appUrl = "http://127.0.0.1:$webPort/"
+    if (-not (Wait-ForHttp -Url $appUrl -Process $webProcess)) {
+        throw "The local web app did not become ready on port $webPort."
+    }
+
+    Start-Process $appUrl
+    Write-Host ""
+    Write-Host "INSTALACAO CONCLUIDA COM EXITO" -ForegroundColor Green
+    Write-Host "Aplicacao local: $appUrl"
+    if ($script:DatabaseMode -eq "backup") {
+        Write-Host "Base PostgreSQL: fiscaliza_caribo (backup importado)"
+    }
+    else {
+        Write-Host "Base PostgreSQL: fiscaliza_caribo (dados de demonstracao)"
+    }
+    $skull = [char]0x2620
+    Write-Host "$skull Desenvolvido pelo Eng. Osvaldo Queta"
+}
+catch {
+    foreach ($process in $script:StartedProcesses) {
+        try {
+            if (-not $process.HasExited) {
+                Stop-Process -Id $process.Id -Force
+            }
+        }
+        catch {}
+    }
+    Write-Host ""
+    Write-Host "ERRO: $($_.Exception.Message)" -ForegroundColor Red
+    exit 1
+}
+finally {
+    $script:AdminPassword = $null
+}

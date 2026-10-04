@@ -1,0 +1,5 @@
+- [pnpm workspace installs](pnpm-workspace-installs.md) — when root-scoped package installation fails in this workspace, target the package with `pnpm --filter`.
+- [Native authentication constraints](native-authentication.md) — preserve roles, profiles, legacy IDs, and audit history; automated bootstrap needs secret-backed input because shell prompts lack a TTY.
+- [Managed workflow port conflicts](managed-workflow-port-conflicts.md) — an old server may keep serving while a reconciled artifact workflow reports its port is occupied.
+- [PostgreSQL backup imports](postgres-backup-import.md) — restore only into verified-empty targets; keep `public` intact because full dumps may omit its creation.
+- [Multipart OpenAPI codegen](multipart-openapi-codegen.md) — generated binary `File`/`Blob` types can break Orval/Zod output; keep unsupported local upload contracts out of codegen.
