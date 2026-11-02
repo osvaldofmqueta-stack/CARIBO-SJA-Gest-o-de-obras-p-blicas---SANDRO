@@ -4,6 +4,11 @@ Sistema web para registar obras públicas, acompanhar contratos e progresso fís
 
 ## Run & Operate
 
+- In Replit, use the Run button to start the two registered application services: `artifacts/api-server: API Server` and `artifacts/fiscaliza-caribo: web`. The Canvas preview service is not needed to run the app.
+- Install JavaScript dependencies with `pnpm install --frozen-lockfile`; Python dependencies are declared in `pyproject.toml` and locked in `uv.lock`.
+- The frontend is served at `/` and Django at `/api` through Replit's shared proxy. Service workflows supply their ports and frontend base path.
+- A fresh database receives the existing Django migrations on API startup. No accounts or demo records are created automatically.
+- Before signing in, create the initial gestor from an interactive Shell using `python artifacts/api-server/manage.py bootstrap_manager`. Enter the name, email and password there, not in chat. For automated setup, the command also accepts `--email`, `--name`, `--password-env` and `--confirmation-env`; the two password variables must be distinct Replit Secrets.
 - `pnpm --filter @workspace/fiscaliza-caribo run dev` — run the React/Vite web interface
 - API workflow — Django REST Framework in `artifacts/api-server` (port 8080, proxied under `/api`)
 - `python artifacts/api-server/manage.py check` — validate the Django application

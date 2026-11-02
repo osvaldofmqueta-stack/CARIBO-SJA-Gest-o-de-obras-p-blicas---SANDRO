@@ -3,3 +3,4 @@
 - [Managed workflow port conflicts](managed-workflow-port-conflicts.md) — an old server may keep serving while a reconciled artifact workflow reports its port is occupied.
 - [PostgreSQL backup imports](postgres-backup-import.md) — restore only into verified-empty targets; keep `public` intact because full dumps may omit its creation.
 - [Multipart OpenAPI codegen](multipart-openapi-codegen.md) — generated binary `File`/`Blob` types can break Orval/Zod output; keep unsupported local upload contracts out of codegen.
+- [Imported artifact registration](imported-artifact-registration.md) — existing manifests may need validated reconciliation when runtime artifact and workflow listings are empty.
