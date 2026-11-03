@@ -20,7 +20,7 @@ Sistema web para registar obras públicas, acompanhar contratos e progresso fís
 - `pnpm run typecheck` — full typecheck across all packages
 - `pnpm run build` — typecheck + build all packages
 - `pnpm --filter @workspace/api-spec run codegen` — regenerate API hooks and Zod schemas from the OpenAPI spec
-- Required env: `DATABASE_URL` and `SESSION_SECRET`
+- Required env: `SESSION_SECRET` and a PostgreSQL connection URL. Set `CARIBO_DATABASE_URL` as a Replit Secret to use an external database such as Neon; it takes priority over Replit's managed `DATABASE_URL`. Without it, Django uses `DATABASE_URL`. Switching the active URL does not copy or delete data between databases.
 
 ## Stack
 

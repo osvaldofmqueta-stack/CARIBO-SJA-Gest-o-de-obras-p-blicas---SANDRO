@@ -88,9 +88,11 @@ TEMPLATES = [
 ]
 WSGI_APPLICATION = "config.wsgi.application"
 
-database_url = os.environ.get("DATABASE_URL")
+database_url = os.environ.get("CARIBO_DATABASE_URL") or os.environ.get("DATABASE_URL")
 if not database_url:
-    raise ImproperlyConfigured("DATABASE_URL must be configured for PostgreSQL.")
+    raise ImproperlyConfigured(
+        "CARIBO_DATABASE_URL or DATABASE_URL must be configured for PostgreSQL."
+    )
 DATABASES = {
     "default": dj_database_url.parse(
         database_url,
