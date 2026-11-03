@@ -5,7 +5,9 @@ $apiDirectory = Join-Path $projectRoot "artifacts\api-server"
 $manageScript = Join-Path $apiDirectory "manage.py"
 $localDirectory = Join-Path $env:LOCALAPPDATA "CariboSJA"
 $localConfig = Join-Path $localDirectory "local.env"
+$neonConnectionConfig = Join-Path $localDirectory "neon.connection.dpapi"
 $script:AdminPassword = $null
+$script:NeonConnectionSecret = $null
 $script:StartedProcesses = New-Object System.Collections.ArrayList
 $script:DatabaseMode = $null
 $script:BackupPath = $null
@@ -24,15 +26,20 @@ function Confirm-Action {
 }
 
 function Select-DatabaseSetup {
-    Write-Step "Choosing local database contents"
-    Write-Host "1. Import a full PostgreSQL backup (.sql, .dump, .backup, or .tar)"
-    Write-Host "2. Create the application tables and load demonstration data"
+    Write-Step "Escolher a base de dados"
+    Write-Host "1. Conectar este PC a base Neon existente (recomendado)"
+    Write-Host "2. Importar um backup PostgreSQL para uma base local"
+    Write-Host "3. Criar uma base PostgreSQL local com dados de demonstracao"
 
     do {
-        $choice = Read-Host "Choose 1 or 2"
-    } while ($choice -notin @("1", "2"))
+        $choice = Read-Host "Escolha 1, 2 ou 3"
+    } while ($choice -notin @("1", "2", "3"))
 
-    if ($choice -eq "2") {
+    if ($choice -eq "1") {
+        $script:DatabaseMode = "neon"
+        return
+    }
+    if ($choice -eq "3") {
         $script:DatabaseMode = "demo"
         return
     }
@@ -176,6 +183,14 @@ function Find-Pnpm {
     return $pnpm
 }
 
+function Find-Uv {
+    $uv = Get-Command uv.exe -ErrorAction SilentlyContinue
+    if (-not $uv) {
+        $uv = Get-Command uv -ErrorAction SilentlyContinue
+    }
+    return $uv
+}
+
 function Find-Psql {
     $psql = Get-Command psql.exe -ErrorAction SilentlyContinue
     if ($psql) {
@@ -268,11 +283,20 @@ function Ensure-Prerequisites {
         throw "pnpm was not found after installation. Close this window, reopen it, and rerun installer.bat."
     }
 
-    if (-not (Find-Psql)) {
-        Install-WingetPackage "PostgreSQL.PostgreSQL.17" "PostgreSQL 17" "https://www.postgresql.org/download/windows/"
+    if (-not (Find-Uv)) {
+        Install-WingetPackage "astral-sh.uv" "uv Python package manager" "https://docs.astral.sh/uv/getting-started/installation/"
     }
-    if (-not (Find-Psql)) {
-        throw "psql.exe was not found after installing PostgreSQL."
+    if (-not (Find-Uv)) {
+        throw "uv was not found after installation. Close this window, reopen it, and rerun installer.bat."
+    }
+
+    if ($script:DatabaseMode -ne "neon") {
+        if (-not (Find-Psql)) {
+            Install-WingetPackage "PostgreSQL.PostgreSQL.17" "PostgreSQL 17" "https://www.postgresql.org/download/windows/"
+        }
+        if (-not (Find-Psql)) {
+            throw "psql.exe was not found after installing PostgreSQL."
+        }
     }
 }
 
@@ -280,23 +304,21 @@ function Install-ProjectDependencies {
     Write-Step "Installing project dependencies"
 
     $pythonInfo = Find-Python
+    $pythonArguments = @($pythonInfo.Prefix) + @("-c", "import sys; print(sys.executable)")
+    $pythonExecutable = (& $pythonInfo.Path @pythonArguments | Select-Object -Last 1).Trim()
+    if ($LASTEXITCODE -ne 0) {
+        throw "Could not locate the supported Python interpreter."
+    }
     $venvDirectory = Join-Path $projectRoot ".venv"
-    $venvPython = Join-Path $venvDirectory "Scripts\python.exe"
-    if (-not (Test-Path $venvPython)) {
-        $pythonArguments = @($pythonInfo.Prefix) + @("-m", "venv", $venvDirectory)
-        & $pythonInfo.Path @pythonArguments
-        if ($LASTEXITCODE -ne 0) {
-            throw "Could not create the local Python environment."
-        }
-    }
-
-    & $venvPython -m pip install --upgrade pip
+    [Environment]::SetEnvironmentVariable("UV_PROJECT_ENVIRONMENT", $venvDirectory, "Process")
+    $uv = Find-Uv
+    & $uv.Source sync --frozen --no-install-project --python $pythonExecutable
+    [Environment]::SetEnvironmentVariable("UV_PROJECT_ENVIRONMENT", $null, "Process")
     if ($LASTEXITCODE -ne 0) {
-        throw "Could not prepare pip in the local Python environment."
+        throw "Could not install the locked Python dependencies from uv.lock."
     }
-    & $venvPython -m pip install -e $projectRoot
-    if ($LASTEXITCODE -ne 0) {
-        throw "Could not install the Python dependencies from pyproject.toml."
+    if (-not (Test-Path (Join-Path $venvDirectory "Scripts\python.exe"))) {
+        throw "uv did not create the expected local Python environment."
     }
 
     $pnpm = Find-Pnpm
@@ -595,10 +617,136 @@ function Import-LocalConfig {
         [Environment]::SetEnvironmentVariable($key, $value, "Process")
     }
 
+    if ($script:DatabaseMode -eq "neon") {
+        return $true
+    }
     if (-not $env:DATABASE_URL -or -not $env:SESSION_SECRET) {
-        throw "The local configuration file is missing DATABASE_URL or SESSION_SECRET."
+        return $false
     }
     return $true
+}
+
+function Set-NeonConnectionFromSecureString {
+    param([System.Security.SecureString]$SecureConnection)
+
+    if (-not $SecureConnection -or $SecureConnection.Length -eq 0) {
+        throw "The Neon connection string cannot be empty."
+    }
+
+    $pointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($SecureConnection)
+    try {
+        $connectionString = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($pointer)
+    }
+    finally {
+        [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($pointer)
+    }
+
+    try {
+        $databaseUri = [System.Uri]$connectionString
+    }
+    catch {
+        throw "Introduza uma URL PostgreSQL valida do Neon."
+    }
+    if ($databaseUri.Scheme -notin @("postgres", "postgresql") -or
+        [string]::IsNullOrWhiteSpace($databaseUri.Host) -or
+        [string]::IsNullOrWhiteSpace($databaseUri.UserInfo) -or
+        $databaseUri.AbsolutePath.Trim("/") -eq "") {
+        throw "Introduza uma URL PostgreSQL valida do Neon."
+    }
+
+    $script:NeonConnectionSecret = $SecureConnection
+    [Environment]::SetEnvironmentVariable("CARIBO_DATABASE_URL", $connectionString, "Process")
+    $connectionString = $null
+}
+
+function Load-ProtectedNeonConnection {
+    if (-not (Test-Path -LiteralPath $neonConnectionConfig -PathType Leaf)) {
+        return $false
+    }
+
+    try {
+        $protectedValue = [System.IO.File]::ReadAllText($neonConnectionConfig).Trim()
+        if ([string]::IsNullOrWhiteSpace($protectedValue)) {
+            throw "empty"
+        }
+        $secureConnection = ConvertTo-SecureString -String $protectedValue
+        Set-NeonConnectionFromSecureString -SecureConnection $secureConnection
+        return $true
+    }
+    catch {
+        throw "Nao foi possivel descodificar a conexao Neon guardada. Execute novamente como o mesmo utilizador Windows ou escolha nao reutilizar e introduza a URL."
+    }
+}
+
+function Save-ProtectedNeonConnection {
+    if (-not $script:NeonConnectionSecret) {
+        throw "The Neon connection is not available to save."
+    }
+
+    [void][System.IO.Directory]::CreateDirectory($localDirectory)
+    $protectedValue = ConvertFrom-SecureString -SecureString $script:NeonConnectionSecret
+    [System.IO.File]::WriteAllText(
+        $neonConnectionConfig,
+        $protectedValue,
+        [System.Text.Encoding]::ASCII
+    )
+    $protectedValue = $null
+    Write-Host "A conexao Neon foi guardada cifrada para este utilizador Windows."
+}
+
+function Configure-NeonDatabase {
+    Write-Step "Configurar a base Neon"
+    Write-Host "A base Neon e partilhada; as alteracoes feitas neste PC aparecem aos outros utilizadores."
+    Write-Host "Fotos do Replit podem nao abrir neste PC; fotos enviadas aqui ficam apenas neste PC."
+    if (-not (Confirm-Action "Compreende que esta instalacao vai usar a base Neon partilhada?")) {
+        throw "Configuracao Neon cancelada; nenhum dado da base foi alterado."
+    }
+
+    $hasLocalConfig = Import-LocalConfig
+    [Environment]::SetEnvironmentVariable("DJANGO_DEBUG", "true", "Process")
+    if (-not $hasLocalConfig -or [string]::IsNullOrWhiteSpace($env:SESSION_SECRET)) {
+        $sessionSecret = [Guid]::NewGuid().ToString("N") + [Guid]::NewGuid().ToString("N")
+        [Environment]::SetEnvironmentVariable("SESSION_SECRET", $sessionSecret, "Process")
+        [void][System.IO.Directory]::CreateDirectory($localDirectory)
+        if ($hasLocalConfig -and (Test-Path -LiteralPath $localConfig -PathType Leaf)) {
+            [System.IO.File]::AppendAllText(
+                $localConfig,
+                "SESSION_SECRET=$sessionSecret`r`nDJANGO_DEBUG=true`r`n",
+                [System.Text.Encoding]::ASCII
+            )
+        }
+        else {
+            [System.IO.File]::WriteAllText(
+                $localConfig,
+                "SESSION_SECRET=$sessionSecret`r`nDJANGO_DEBUG=true`r`n",
+                [System.Text.Encoding]::ASCII
+            )
+        }
+        $sessionSecret = $null
+    }
+
+    $reuseSavedConnection = $false
+    if (Test-Path -LiteralPath $neonConnectionConfig -PathType Leaf) {
+        $reuseSavedConnection = Confirm-Action "Reutilizar a conexao Neon cifrada deste utilizador?"
+    }
+    if ($reuseSavedConnection) {
+        [void](Load-ProtectedNeonConnection)
+    }
+    else {
+        $secureConnection = Read-Host "Introduza a URL PostgreSQL do Neon (entrada oculta)" -AsSecureString
+        Set-NeonConnectionFromSecureString -SecureConnection $secureConnection
+    }
+
+    [Environment]::SetEnvironmentVariable("PGCONNECT_TIMEOUT", "10", "Process")
+}
+
+function Test-NeonDatabaseConnection {
+    $venvPython = Join-Path $projectRoot ".venv\Scripts\python.exe"
+    $code = "from django.db import connection; connection.ensure_connection(); print('CARIBO_NEON_CONNECTION_OK')"
+    $output = @(& $venvPython $manageScript shell -c $code 2>&1)
+    if ($LASTEXITCODE -ne 0 -or (($output -join "`n") -notmatch "CARIBO_NEON_CONNECTION_OK")) {
+        throw "Nao foi possivel conectar ao Neon. Verifique a URL, a rede e o estado do projeto. Nenhuma migracao foi executada."
+    }
 }
 
 function Find-FreePort {
@@ -663,22 +811,29 @@ try {
     Validate-PostgresBackupArchive
     Install-ProjectDependencies
 
-    Write-Step "Loading local database configuration"
-    if (-not (Import-LocalConfig)) {
-        Create-LocalDatabase
-        if (-not (Import-LocalConfig)) {
-            throw "Could not load the local PostgreSQL configuration."
-        }
+    if ($script:DatabaseMode -eq "neon") {
+        Configure-NeonDatabase
+        Test-NeonDatabaseConnection
     }
-
-    if ($script:DatabaseMode -eq "backup") {
-        if (-not (Test-DatabaseEmpty -UseLocalCredentials)) {
-            throw "The local database already contains application objects. The backup was not imported and no existing data was changed."
+    else {
+        [Environment]::SetEnvironmentVariable("CARIBO_DATABASE_URL", $null, "Process")
+        Write-Step "Loading local database configuration"
+        if (-not (Import-LocalConfig)) {
+            Create-LocalDatabase
+            if (-not (Import-LocalConfig)) {
+                throw "Could not load the local PostgreSQL configuration."
+            }
         }
 
-        Write-Step "Importing the PostgreSQL backup"
-        [void](Invoke-LocalPsql -Sql "ALTER SCHEMA public OWNER TO fiscaliza_app; GRANT ALL PRIVILEGES ON SCHEMA public TO fiscaliza_app;")
-        Invoke-PostgresBackupRestore
+        if ($script:DatabaseMode -eq "backup") {
+            if (-not (Test-DatabaseEmpty -UseLocalCredentials)) {
+                throw "The local database already contains application objects. The backup was not imported and no existing data was changed."
+            }
+
+            Write-Step "Importing the PostgreSQL backup"
+            [void](Invoke-LocalPsql -Sql "ALTER SCHEMA public OWNER TO fiscaliza_app; GRANT ALL PRIVILEGES ON SCHEMA public TO fiscaliza_app;")
+            Invoke-PostgresBackupRestore
+        }
     }
 
     $venvPython = Join-Path $projectRoot ".venv\Scripts\python.exe"
@@ -686,9 +841,18 @@ try {
     if ($LASTEXITCODE -ne 0) {
         throw "Django configuration checks failed."
     }
-    & $venvPython $manageScript migrate --noinput
-    if ($LASTEXITCODE -ne 0) {
-        throw "Database migrations failed."
+    if ($script:DatabaseMode -eq "neon") {
+        & $venvPython $manageScript migrate --check
+        if ($LASTEXITCODE -ne 0) {
+            throw "A base Neon tem migracoes Django pendentes. O instalador nao alterou o esquema; aplique as migracoes num ambiente administrativo e tente novamente."
+        }
+        Save-ProtectedNeonConnection
+    }
+    else {
+        & $venvPython $manageScript migrate --noinput
+        if ($LASTEXITCODE -ne 0) {
+            throw "Database migrations failed."
+        }
     }
     if ($script:DatabaseMode -eq "demo") {
         & $venvPython $manageScript seed_demo
@@ -698,8 +862,8 @@ try {
     }
 
     if (-not (Test-LocalManager)) {
-        Write-Step "Creating the first local Gestor account"
-        Write-Host "No active local Gestor superuser was found. The command will ask for the email, name, and password."
+        Write-Step "Criar o primeiro Gestor da base selecionada"
+        Write-Host "Nao foi encontrado um Gestor ativo. O comando pedira email, nome e palavra-passe."
         & $venvPython $manageScript bootstrap_manager
         if ($LASTEXITCODE -ne 0) {
             throw "The Gestor account was not created."
@@ -709,7 +873,7 @@ try {
         }
     }
     else {
-        Write-Host "An active local Gestor account already exists; its password was not changed."
+        Write-Host "Ja existe um Gestor ativo; a palavra-passe nao foi alterada."
     }
 
     Write-Step "Starting the local application"
@@ -735,6 +899,10 @@ try {
         throw "The local API did not become healthy on port $apiPort."
     }
 
+    [Environment]::SetEnvironmentVariable("CARIBO_DATABASE_URL", $null, "Process")
+    [Environment]::SetEnvironmentVariable("DATABASE_URL", $null, "Process")
+    [Environment]::SetEnvironmentVariable("SESSION_SECRET", $null, "Process")
+
     $commandPrompt = Join-Path $env:SystemRoot "System32\cmd.exe"
     $webProcess = Start-Process `
         -FilePath $commandPrompt `
@@ -752,7 +920,10 @@ try {
     Write-Host ""
     Write-Host "INSTALACAO CONCLUIDA COM EXITO" -ForegroundColor Green
     Write-Host "Aplicacao local: $appUrl"
-    if ($script:DatabaseMode -eq "backup") {
+    if ($script:DatabaseMode -eq "neon") {
+        Write-Host "Base PostgreSQL: Neon (partilhada; sem importacao automatica de dados)"
+    }
+    elseif ($script:DatabaseMode -eq "backup") {
         Write-Host "Base PostgreSQL: fiscaliza_caribo (backup importado)"
     }
     else {
