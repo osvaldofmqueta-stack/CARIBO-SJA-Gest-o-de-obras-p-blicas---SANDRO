@@ -17,7 +17,7 @@ if not exist "%~dp0scripts\install-local.ps1" (
 )
 
 echo Configuracao local do Caribo SJA
-echo Escolha Neon para conectar a base partilhada existente.
+echo Este instalador conecta o PC a base Neon existente; nao cria nem importa bases locais.
 echo A URL do Neon e introduzida sem aparecer no ecra e guardada cifrada para este utilizador.
 echo Os dados ficam partilhados; fotos enviadas ficam apenas neste PC.
 echo.

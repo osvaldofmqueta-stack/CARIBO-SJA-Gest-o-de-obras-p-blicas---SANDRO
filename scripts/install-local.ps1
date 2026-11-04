@@ -26,55 +26,9 @@ function Confirm-Action {
 }
 
 function Select-DatabaseSetup {
-    Write-Step "Escolher a base de dados"
-    Write-Host "1. Conectar este PC a base Neon existente (recomendado)"
-    Write-Host "2. Importar um backup PostgreSQL para uma base local"
-    Write-Host "3. Criar uma base PostgreSQL local com dados de demonstracao"
-
-    do {
-        $choice = Read-Host "Escolha 1, 2 ou 3"
-    } while ($choice -notin @("1", "2", "3"))
-
-    if ($choice -eq "1") {
-        $script:DatabaseMode = "neon"
-        return
-    }
-    if ($choice -eq "3") {
-        $script:DatabaseMode = "demo"
-        return
-    }
-
-    $script:DatabaseMode = "backup"
-    $backupPath = (Read-Host "Enter the full path to the PostgreSQL backup file").Trim()
-    if ($backupPath.Length -ge 2 -and
-        $backupPath.StartsWith('"') -and
-        $backupPath.EndsWith('"')) {
-        $backupPath = $backupPath.Substring(1, $backupPath.Length - 2)
-    }
-    if (-not (Test-Path -LiteralPath $backupPath -PathType Leaf)) {
-        throw "The selected PostgreSQL backup file was not found."
-    }
-
-    $script:BackupPath = (Resolve-Path -LiteralPath $backupPath).Path
-    $extension = [System.IO.Path]::GetExtension($script:BackupPath).ToLowerInvariant()
-    if ($extension -eq ".sql") {
-        $script:BackupFormat = "sql"
-        $unsafeSql = Select-String -LiteralPath $script:BackupPath -Quiet -Pattern '^\s*\\(?:connect|c)\b|^\s*(?:CREATE|ALTER)\s+DATABASE\b|^\s*(?:CREATE|ALTER|DROP)\s+(?:ROLE|USER)\b|^\s*SET\s+SESSION\s+AUTHORIZATION\b|^\s*ALTER\s+.*\sOWNER\s+TO\b|^\s*(?:GRANT|REVOKE)\b'
-        if ($unsafeSql) {
-            throw "This SQL file contains database, role, ownership, or permission commands. Use a single-database pg_dump made with --no-owner --no-acl and without --create."
-        }
-        $hasTableDefinitions = Select-String -LiteralPath $script:BackupPath -Quiet -Pattern '^\s*CREATE\s+TABLE\b'
-        if (-not $hasTableDefinitions) {
-            throw "The SQL file does not appear to contain application table definitions. Select a full database backup, not a data-only export."
-        }
-        Write-Host "For a plain SQL file, use a full single-database pg_dump made with --no-owner --no-acl and without --create."
-    }
-    elseif ($extension -in @(".dump", ".backup", ".tar")) {
-        $script:BackupFormat = "archive"
-    }
-    else {
-        throw "Unsupported backup file type. Select a .sql, .dump, .backup, or .tar file."
-    }
+    Write-Step "Conectar a base de dados existente"
+    Write-Host "Este instalador liga o PC a base Neon existente; nao cria nem importa uma base local."
+    $script:DatabaseMode = "neon"
 }
 
 function Refresh-Path {
@@ -101,20 +55,6 @@ function Install-WingetPackage {
 
     if (-not (Confirm-Action "$DisplayName is missing or unsupported. Install it now?")) {
         throw "Installation of $DisplayName was declined."
-    }
-
-    if ($PackageId -eq "Python.Python.3.12") {
-        try {
-            $installedOutput = @(& $winget.Source list --id $PackageId --exact --source winget --accept-source-agreements --disable-interactivity 2>&1)
-            $installedExitCode = $LASTEXITCODE
-            $installedText = $installedOutput -join "`n"
-            if ($installedExitCode -eq 0 -and $installedText -match [regex]::Escape($PackageId)) {
-                Write-Host "$DisplayName is already registered with winget. Checking its installed location..."
-                Refresh-Path
-                return
-            }
-        }
-        catch {}
     }
 
     Write-Host "Installing $DisplayName with winget..."
@@ -264,6 +204,25 @@ function Find-Python {
         catch {}
     }
 
+    $uv = Find-Uv
+    if ($uv) {
+        try {
+            $managedPython = (& $uv.Source python find 3.12 --managed-python 2>$null | Select-Object -Last 1).Trim()
+            if ($LASTEXITCODE -eq 0 -and
+                -not [string]::IsNullOrWhiteSpace($managedPython) -and
+                (Test-Path -LiteralPath $managedPython)) {
+                $versionText = & $managedPython -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])' 2>$null
+                if ($LASTEXITCODE -eq 0 -and [version]($versionText | Select-Object -Last 1) -ge [version]"3.11.0") {
+                    return [pscustomobject]@{
+                        Path = $managedPython
+                        Prefix = @()
+                    }
+                }
+            }
+        }
+        catch {}
+    }
+
     return $null
 }
 
@@ -355,11 +314,23 @@ function Find-PgRestore {
 function Ensure-Prerequisites {
     Write-Step "Checking Windows prerequisites"
 
+    if (-not (Find-Uv)) {
+        Install-WingetPackage "astral-sh.uv" "uv Python package manager" "https://docs.astral.sh/uv/getting-started/installation/"
+    }
+    if (-not (Find-Uv)) {
+        throw "uv was not found after installation. Close this window, reopen it, and rerun installer.bat."
+    }
+
     if (-not (Find-Python)) {
-        Install-WingetPackage "Python.Python.3.12" "Python 3.12" "https://www.python.org/downloads/windows/"
+        $uv = Find-Uv
+        Write-Host "Python was not found in a standard Windows location. Downloading a private Python 3.12 with uv..."
+        & $uv.Source python install 3.12
+        if ($LASTEXITCODE -ne 0) {
+            throw "Could not install the private Python 3.12 runtime with uv."
+        }
     }
     if (-not (Find-Python)) {
-        throw "Python 3.11 or newer was not found after installation."
+        throw "Python 3.11 or newer could not be found. Check that the uv Python download completed."
     }
 
     $node = Find-NodeVersion
@@ -398,13 +369,6 @@ function Ensure-Prerequisites {
     }
     if (-not (Find-Pnpm)) {
         throw "pnpm was not found after installation. Close this window, reopen it, and rerun installer.bat."
-    }
-
-    if (-not (Find-Uv)) {
-        Install-WingetPackage "astral-sh.uv" "uv Python package manager" "https://docs.astral.sh/uv/getting-started/installation/"
-    }
-    if (-not (Find-Uv)) {
-        throw "uv was not found after installation. Close this window, reopen it, and rerun installer.bat."
     }
 
     if ($script:DatabaseMode -ne "neon") {
