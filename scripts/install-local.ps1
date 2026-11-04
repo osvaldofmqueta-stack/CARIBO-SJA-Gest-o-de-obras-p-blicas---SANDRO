@@ -4,6 +4,7 @@ $projectRoot = Split-Path -Parent $PSScriptRoot
 $apiDirectory = Join-Path $projectRoot "artifacts\api-server"
 $manageScript = Join-Path $apiDirectory "manage.py"
 $localDirectory = Join-Path $env:LOCALAPPDATA "CariboSJA"
+$script:PythonRuntimeDirectory = Join-Path $localDirectory "python-runtime"
 $localConfig = Join-Path $localDirectory "local.env"
 $neonConnectionConfig = Join-Path $localDirectory "neon.connection.dpapi"
 $script:AdminPassword = $null
@@ -185,6 +186,16 @@ function Find-Python {
         }
     }
 
+    if (Test-Path -LiteralPath $script:PythonRuntimeDirectory) {
+        $pythonCandidates += Get-ChildItem `
+            -LiteralPath $script:PythonRuntimeDirectory `
+            -Filter "python.exe" `
+            -File `
+            -Recurse `
+            -ErrorAction SilentlyContinue |
+            Select-Object -ExpandProperty FullName
+    }
+
     foreach ($pythonExecutable in ($pythonCandidates | Select-Object -Unique)) {
         if (-not (Test-Path -LiteralPath $pythonExecutable)) {
             continue
@@ -196,25 +207,6 @@ function Find-Python {
                 if ($version -ge [version]"3.11.0") {
                     return [pscustomobject]@{
                         Path = $pythonExecutable
-                        Prefix = @()
-                    }
-                }
-            }
-        }
-        catch {}
-    }
-
-    $uv = Find-Uv
-    if ($uv) {
-        try {
-            $managedPython = (& $uv.Source python find 3.12 --managed-python 2>$null | Select-Object -Last 1).Trim()
-            if ($LASTEXITCODE -eq 0 -and
-                -not [string]::IsNullOrWhiteSpace($managedPython) -and
-                (Test-Path -LiteralPath $managedPython)) {
-                $versionText = & $managedPython -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])' 2>$null
-                if ($LASTEXITCODE -eq 0 -and [version]($versionText | Select-Object -Last 1) -ge [version]"3.11.0") {
-                    return [pscustomobject]@{
-                        Path = $managedPython
                         Prefix = @()
                     }
                 }
@@ -312,7 +304,7 @@ function Find-PgRestore {
 }
 
 function Ensure-Prerequisites {
-    Write-Step "Checking Windows prerequisites"
+    Write-Step "Verificar requisitos do Windows"
 
     if (-not (Find-Uv)) {
         Install-WingetPackage "astral-sh.uv" "uv Python package manager" "https://docs.astral.sh/uv/getting-started/installation/"
@@ -323,14 +315,25 @@ function Ensure-Prerequisites {
 
     if (-not (Find-Python)) {
         $uv = Find-Uv
-        Write-Host "Python was not found in a standard Windows location. Downloading a private Python 3.12 with uv..."
-        & $uv.Source python install 3.12
-        if ($LASTEXITCODE -ne 0) {
-            throw "Could not install the private Python 3.12 runtime with uv."
+        Write-Host "Python nao foi localizado. Vou instalar uma copia privada do Python 3.12 para este aplicativo; a instalacao existente nao sera removida."
+        $previousInstallDirectory = $env:UV_PYTHON_INSTALL_DIR
+        $previousDownloadPolicy = $env:UV_PYTHON_DOWNLOADS
+        [Environment]::SetEnvironmentVariable("UV_PYTHON_INSTALL_DIR", $script:PythonRuntimeDirectory, "Process")
+        [Environment]::SetEnvironmentVariable("UV_PYTHON_DOWNLOADS", "manual", "Process")
+        try {
+            & $uv.Source python install 3.12 --install-dir $script:PythonRuntimeDirectory --no-bin
+            $pythonInstallExitCode = $LASTEXITCODE
+        }
+        finally {
+            [Environment]::SetEnvironmentVariable("UV_PYTHON_INSTALL_DIR", $previousInstallDirectory, "Process")
+            [Environment]::SetEnvironmentVariable("UV_PYTHON_DOWNLOADS", $previousDownloadPolicy, "Process")
+        }
+        if ($pythonInstallExitCode -ne 0) {
+            throw "Nao foi possivel instalar o Python 3.12 privado com uv. Verifique a ligacao a internet e tente novamente."
         }
     }
     if (-not (Find-Python)) {
-        throw "Python 3.11 or newer could not be found. Check that the uv Python download completed."
+        throw "O Python 3.11 ou superior nao foi encontrado depois da instalacao."
     }
 
     $node = Find-NodeVersion
