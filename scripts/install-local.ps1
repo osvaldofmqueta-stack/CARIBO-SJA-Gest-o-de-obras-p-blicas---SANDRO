@@ -103,6 +103,20 @@ function Install-WingetPackage {
         throw "Installation of $DisplayName was declined."
     }
 
+    if ($PackageId -eq "Python.Python.3.12") {
+        try {
+            $installedOutput = @(& $winget.Source list --id $PackageId --exact --source winget --accept-source-agreements --disable-interactivity 2>&1)
+            $installedExitCode = $LASTEXITCODE
+            $installedText = $installedOutput -join "`n"
+            if ($installedExitCode -eq 0 -and $installedText -match [regex]::Escape($PackageId)) {
+                Write-Host "$DisplayName is already registered with winget. Checking its installed location..."
+                Refresh-Path
+                return
+            }
+        }
+        catch {}
+    }
+
     Write-Host "Installing $DisplayName with winget..."
     & $winget.Source install --id $PackageId --exact --source winget --accept-source-agreements --accept-package-agreements
     if ($LASTEXITCODE -ne 0) {
@@ -159,6 +173,46 @@ function Find-Python {
                 }
                 if ($installDirectory) {
                     $pythonCandidates += (Join-Path ([string]$installDirectory) "python.exe")
+                }
+            }
+            catch {}
+        }
+    }
+
+    $appPathKeys = @(
+        "HKCU:\Software\Microsoft\Windows\CurrentVersion\App Paths\python.exe",
+        "HKLM:\Software\Microsoft\Windows\CurrentVersion\App Paths\python.exe",
+        "HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\App Paths\python.exe"
+    )
+    foreach ($appPathKey in $appPathKeys) {
+        if (-not (Test-Path $appPathKey)) {
+            continue
+        }
+        try {
+            $registeredExecutable = (Get-Item -LiteralPath $appPathKey).GetValue("")
+            if ($registeredExecutable) {
+                $pythonCandidates += [string]$registeredExecutable
+            }
+        }
+        catch {}
+    }
+
+    $uninstallRoots = @(
+        "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall",
+        "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall",
+        "HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"
+    )
+    foreach ($uninstallRoot in $uninstallRoots) {
+        if (-not (Test-Path $uninstallRoot)) {
+            continue
+        }
+        foreach ($applicationKey in (Get-ChildItem -Path $uninstallRoot -ErrorAction SilentlyContinue)) {
+            try {
+                $application = Get-ItemProperty -LiteralPath $applicationKey.PSPath -ErrorAction Stop
+                if ($application.DisplayName -match '^Python\s+3\.(11|12|13)') {
+                    if ($application.InstallLocation) {
+                        $pythonCandidates += (Join-Path ([string]$application.InstallLocation) "python.exe")
+                    }
                 }
             }
             catch {}
