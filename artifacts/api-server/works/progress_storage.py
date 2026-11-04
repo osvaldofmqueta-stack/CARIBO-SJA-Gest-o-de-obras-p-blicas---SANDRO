@@ -7,6 +7,7 @@ from pathlib import PurePosixPath
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from django.conf import settings
 from django.core.files.storage import default_storage
 from rest_framework.exceptions import APIException, ValidationError
 
@@ -25,18 +26,31 @@ SIDECAR_ENDPOINT = os.environ.get(
 
 class StorageUnavailable(APIException):
     status_code = 503
-    default_detail = "O armazenamento de fotografias está indisponível."
+    default_detail = (
+        "As fotografias precisam de armazenamento partilhado, que não está "
+        "configurado. Configure o App Storage antes de enviar ou abrir fotografias."
+    )
     default_code = "storage_unavailable"
 
 
 def active_storage_backend():
-    if os.environ.get("CARIBO_LOCAL", "").lower() in {"1", "true", "yes"}:
-        return "local"
     if os.environ.get("PRIVATE_OBJECT_DIR", "").strip():
         return "object"
-    if os.environ.get("DJANGO_DEBUG", "").lower() == "true":
+    if (
+        os.environ.get("CARIBO_LOCAL", "").lower() in {"1", "true", "yes"}
+        and not getattr(settings, "CARIBO_SHARED_DATABASE", False)
+    ):
+        return "local"
+    if (
+        os.environ.get("DJANGO_DEBUG", "").lower() == "true"
+        and not getattr(settings, "CARIBO_SHARED_DATABASE", False)
+    ):
         return "local"
     return None
+
+
+def local_photos_are_shareable():
+    return not getattr(settings, "CARIBO_SHARED_DATABASE", False)
 
 
 def _content_type_from_signature(signature):

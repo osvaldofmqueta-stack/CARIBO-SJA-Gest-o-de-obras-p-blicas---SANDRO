@@ -23,6 +23,7 @@ from .progress_storage import (
     StorageUnavailable,
     active_storage_backend,
     create_object_upload,
+    local_photos_are_shareable,
     open_local_photo,
     safe_original_name,
     save_local_photo,
@@ -126,6 +127,17 @@ class ObraActualizacoesView(APIView):
                     photo["content_type"],
                 )
             else:
+                if not local_photos_are_shareable():
+                    return Response(
+                        {
+                            "detail": (
+                                "Esta instalação usa uma base de dados partilhada; "
+                                "fotografias guardadas apenas neste PC não podem ser "
+                                "publicadas. Configure o App Storage."
+                            )
+                        },
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
                 actual_size, actual_type = verify_local_photo(
                     photo["object_path"],
                     photo["content_type"],
@@ -297,6 +309,11 @@ class ObraFotoView(APIView):
             response["Cache-Control"] = "private, no-store"
             return response
 
+        if not local_photos_are_shareable():
+            raise StorageUnavailable(
+                "Esta fotografia está guardada apenas neste PC e não pode ser "
+                "aberta através da base de dados partilhada."
+            )
         response = FileResponse(
             open_local_photo(foto.object_path),
             content_type=foto.content_type,

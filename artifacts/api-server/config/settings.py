@@ -100,6 +100,13 @@ DATABASES = {
         conn_health_checks=True,
     )
 }
+database_host = (DATABASES["default"].get("HOST") or "").strip().lower()
+CARIBO_SHARED_DATABASE = database_host not in {
+    "",
+    "localhost",
+    "127.0.0.1",
+    "::1",
+}
 
 AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},

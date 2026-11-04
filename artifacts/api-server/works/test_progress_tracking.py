@@ -225,7 +225,10 @@ class ProgressPublishingTests(TestCase):
 
     def test_local_photo_upload_and_private_retrieval(self):
         with TemporaryDirectory() as media_root:
-            with override_settings(MEDIA_ROOT=media_root):
+            with override_settings(
+                MEDIA_ROOT=media_root,
+                CARIBO_SHARED_DATABASE=False,
+            ):
                 with patch(
                     "works.progress_views.active_storage_backend",
                     return_value="local",
@@ -298,3 +301,73 @@ class ProgressPublishingTests(TestCase):
                     ).status_code,
                     404,
                 )
+
+    def test_shared_database_requires_shared_photo_storage(self):
+        update = ActualizacaoObra.objects.create(
+            obra=self.work,
+            titulo="Registo fotográfico",
+            progresso=30,
+            autor=self.fiscal,
+        )
+        photo = FotoActualizacaoObra.objects.create(
+            actualizacao=update,
+            object_path=f"obra-actualizacoes/{self.work.pk}/photo.jpg",
+            storage_backend=FotoActualizacaoObra.StorageBackend.LOCAL,
+            nome_original="photo.jpg",
+            content_type="image/jpeg",
+            tamanho=4,
+        )
+
+        with (
+            override_settings(CARIBO_SHARED_DATABASE=True),
+            patch.dict(
+                "os.environ",
+                {"CARIBO_LOCAL": "1", "PRIVATE_OBJECT_DIR": ""},
+            ),
+        ):
+            upload_target = self.api.post(
+                f"/api/obras/{self.work.pk}/actualizacoes/upload-url",
+                {"content_type": "image/jpeg", "tamanho": 16},
+                format="json",
+            )
+            self.assertEqual(upload_target.status_code, 503)
+            self.assertIn("armazenamento partilhado", upload_target.data["detail"])
+
+            local_upload = self.api.post(
+                f"/api/obras/{self.work.pk}/actualizacoes/upload-local",
+                {
+                    "foto": SimpleUploadedFile(
+                        "photo.jpg",
+                        b"\xff\xd8\xff" + b"\x00" * 24,
+                        content_type="image/jpeg",
+                    )
+                },
+                format="multipart",
+            )
+            self.assertEqual(local_upload.status_code, 503)
+
+            publish = self.api.post(
+                f"/api/obras/{self.work.pk}/actualizacoes",
+                {
+                    "titulo": "Publicação local",
+                    "progresso": 35,
+                    "fotos": [
+                        {
+                            "object_path": photo.object_path,
+                            "storage_backend": "local",
+                            "nome_original": photo.nome_original,
+                            "content_type": photo.content_type,
+                            "tamanho": photo.tamanho,
+                        }
+                    ],
+                },
+                format="json",
+            )
+            self.assertEqual(publish.status_code, 400)
+            self.assertIn("não podem ser publicadas", publish.data["detail"])
+
+            photo_response = self.api.get(
+                f"/api/obras/{self.work.pk}/actualizacoes/{update.pk}/fotos/{photo.pk}"
+            )
+            self.assertEqual(photo_response.status_code, 503)
+            self.assertIn("apenas neste PC", photo_response.data["detail"])
