@@ -68,10 +68,12 @@ function Install-WingetPackage {
 }
 
 function Find-Python {
+    # Windows PowerShell 5.1 strips embedded double quotes in native arguments.
+    # Keep these -c probes quote-free so installed interpreters are not rejected.
     $launcher = Get-Command py.exe -ErrorAction SilentlyContinue
     if ($launcher) {
         try {
-            $versionText = & $launcher.Source -3 -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])' 2>$null
+            $versionText = & $launcher.Source -3 -c 'import sys; print(sys.version.split()[0])' 2>$null
             if ($LASTEXITCODE -eq 0) {
                 $version = [version]($versionText | Select-Object -Last 1)
                 if ($version -ge [version]"3.11.0") {
@@ -201,7 +203,7 @@ function Find-Python {
             continue
         }
         try {
-            $versionText = & $pythonExecutable -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])' 2>$null
+            $versionText = & $pythonExecutable -c 'import sys; print(sys.version.split()[0])' 2>$null
             if ($LASTEXITCODE -eq 0) {
                 $version = [version]($versionText | Select-Object -Last 1)
                 if ($version -ge [version]"3.11.0") {
@@ -239,7 +241,7 @@ function Find-Python {
                 -not [string]::IsNullOrWhiteSpace($managedPython) -and
                 (Test-Path -LiteralPath $managedPython)) {
                 $managedPython = ([string]$managedPython).Trim()
-                $versionText = & $managedPython -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])' 2>$null
+                $versionText = & $managedPython -c 'import sys; print(sys.version.split()[0])' 2>$null
                 if ($LASTEXITCODE -eq 0 -and [version]($versionText | Select-Object -Last 1) -ge [version]"3.11.0") {
                     return [pscustomobject]@{
                         Path = $managedPython
