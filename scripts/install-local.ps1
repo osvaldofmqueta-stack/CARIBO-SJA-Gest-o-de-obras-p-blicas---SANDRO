@@ -215,6 +215,46 @@ function Find-Python {
         catch {}
     }
 
+    $uv = Find-Uv
+    if ($uv) {
+        $previousInstallDirectory = $env:UV_PYTHON_INSTALL_DIR
+        $previousPythonPreference = $env:UV_PYTHON_PREFERENCE
+        try {
+            [Environment]::SetEnvironmentVariable("UV_PYTHON_PREFERENCE", "only-managed", "Process")
+            [Environment]::SetEnvironmentVariable("UV_PYTHON_INSTALL_DIR", $script:PythonRuntimeDirectory, "Process")
+            $managedPythonOutput = @(& $uv.Source python find 3.12 2>$null)
+            $managedPythonExitCode = $LASTEXITCODE
+            $managedPython = ($managedPythonOutput | Select-Object -Last 1)
+
+            if ($managedPythonExitCode -ne 0 -or
+                [string]::IsNullOrWhiteSpace($managedPython) -or
+                -not (Test-Path -LiteralPath $managedPython)) {
+                [Environment]::SetEnvironmentVariable("UV_PYTHON_INSTALL_DIR", $previousInstallDirectory, "Process")
+                $managedPythonOutput = @(& $uv.Source python find 3.12 2>$null)
+                $managedPythonExitCode = $LASTEXITCODE
+                $managedPython = ($managedPythonOutput | Select-Object -Last 1)
+            }
+
+            if ($managedPythonExitCode -eq 0 -and
+                -not [string]::IsNullOrWhiteSpace($managedPython) -and
+                (Test-Path -LiteralPath $managedPython)) {
+                $managedPython = ([string]$managedPython).Trim()
+                $versionText = & $managedPython -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])' 2>$null
+                if ($LASTEXITCODE -eq 0 -and [version]($versionText | Select-Object -Last 1) -ge [version]"3.11.0") {
+                    return [pscustomobject]@{
+                        Path = $managedPython
+                        Prefix = @()
+                    }
+                }
+            }
+        }
+        catch {}
+        finally {
+            [Environment]::SetEnvironmentVariable("UV_PYTHON_INSTALL_DIR", $previousInstallDirectory, "Process")
+            [Environment]::SetEnvironmentVariable("UV_PYTHON_PREFERENCE", $previousPythonPreference, "Process")
+        }
+    }
+
     return $null
 }
 

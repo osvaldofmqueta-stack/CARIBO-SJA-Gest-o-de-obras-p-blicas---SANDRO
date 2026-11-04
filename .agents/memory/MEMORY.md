@@ -4,3 +4,4 @@
 - [PostgreSQL backup imports](postgres-backup-import.md) — restore only into verified-empty targets; keep `public` intact because full dumps may omit its creation.
 - [Multipart OpenAPI codegen](multipart-openapi-codegen.md) — generated binary `File`/`Blob` types can break Orval/Zod output; keep unsupported local upload contracts out of codegen.
 - [Imported artifact registration](imported-artifact-registration.md) — existing manifests may need validated reconciliation when runtime artifact and workflow listings are empty.
+- [uv-managed Python discovery](uv-managed-python-discovery.md) — temporarily prefer managed Python and point uv at its install directory when resolving a local Windows runtime.
