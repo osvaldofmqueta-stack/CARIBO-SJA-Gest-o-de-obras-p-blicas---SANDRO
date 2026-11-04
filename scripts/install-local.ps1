@@ -130,15 +130,78 @@ function Find-Python {
         catch {}
     }
 
+    $pythonCandidates = @()
     $python = Get-Command python.exe -ErrorAction SilentlyContinue
     if ($python) {
+        $pythonCandidates += $python.Source
+    }
+
+    $registryRoots = @(
+        "HKCU:\Software\Python\PythonCore",
+        "HKLM:\Software\Python\PythonCore",
+        "HKLM:\Software\WOW6432Node\Python\PythonCore"
+    )
+    foreach ($registryRoot in $registryRoots) {
+        if (-not (Test-Path $registryRoot)) {
+            continue
+        }
+        foreach ($versionKey in (Get-ChildItem -Path $registryRoot -ErrorAction SilentlyContinue)) {
+            $installPathKey = Join-Path $versionKey.PSPath "InstallPath"
+            if (-not (Test-Path $installPathKey)) {
+                continue
+            }
+            try {
+                $installPath = Get-Item -LiteralPath $installPathKey
+                $executablePath = $installPath.GetValue("ExecutablePath")
+                $installDirectory = $installPath.GetValue("")
+                if ($executablePath) {
+                    $pythonCandidates += [string]$executablePath
+                }
+                if ($installDirectory) {
+                    $pythonCandidates += (Join-Path ([string]$installDirectory) "python.exe")
+                }
+            }
+            catch {}
+        }
+    }
+
+    $pythonRoots = @()
+    if ($env:LOCALAPPDATA) {
+        $pythonRoots += (Join-Path $env:LOCALAPPDATA "Programs\Python")
+    }
+    if ($env:ProgramFiles) {
+        $pythonRoots += $env:ProgramFiles
+    }
+    if (${env:ProgramFiles(x86)}) {
+        $pythonRoots += ${env:ProgramFiles(x86)}
+    }
+    $pythonRoots += "C:\Python"
+    foreach ($pythonRoot in ($pythonRoots | Select-Object -Unique)) {
+        if (-not (Test-Path $pythonRoot)) {
+            continue
+        }
+        if (Test-Path (Join-Path $pythonRoot "python.exe")) {
+            $pythonCandidates += (Join-Path $pythonRoot "python.exe")
+        }
+        foreach ($pythonDirectory in (Get-ChildItem -Path $pythonRoot -Directory -ErrorAction SilentlyContinue)) {
+            if ($pythonDirectory.Name -match '^Python3\d+$') {
+                $candidate = Join-Path $pythonDirectory.FullName "python.exe"
+                $pythonCandidates += $candidate
+            }
+        }
+    }
+
+    foreach ($pythonExecutable in ($pythonCandidates | Select-Object -Unique)) {
+        if (-not (Test-Path -LiteralPath $pythonExecutable)) {
+            continue
+        }
         try {
-            $versionText = & $python.Source -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])' 2>$null
+            $versionText = & $pythonExecutable -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])' 2>$null
             if ($LASTEXITCODE -eq 0) {
                 $version = [version]($versionText | Select-Object -Last 1)
                 if ($version -ge [version]"3.11.0") {
                     return [pscustomobject]@{
-                        Path = $python.Source
+                        Path = $pythonExecutable
                         Prefix = @()
                     }
                 }
